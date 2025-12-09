@@ -1,0 +1,9 @@
+yfinance>=0.2.32
+pandas>=2.0.0
+numpy>=1.24.0
+pytz>=2023.3
+aiohttp>=3.9.0
+flask>=3.0.0
+flask-socketio>=5.3.5
+python-socketio>=5.10.0
+requests>=2.31.0
