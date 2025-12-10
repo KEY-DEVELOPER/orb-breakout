@@ -1,22 +1,3 @@
-"""ORB Scanner - Fused Pro+Control Dashboard
-
-Fuses:
-- Pro dashboard look & layout (v3.0 style)
-- Control dashboard features (symbol management, Telegram/Email notifications, connection tests)
-Adds:
-- Market status for multiple sessions/timezones with countdowns
-- Click a symbol card to open a modal with deeper stats + intraday chart
-
-Run:
-  python fused_pro_control_dashboard.py
-Then open:
-  http://localhost:5003
-
-Notes:
-- Requires orb_scanner.py providing ORBScanner, ORBSignal
-- Uses yfinance for data
-"""
-
 from __future__ import annotations
 
 from flask import Flask, render_template, jsonify, request
@@ -30,40 +11,40 @@ import aiohttp
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-
 import pytz
 import yfinance as yf
 import logging
-
-# Suppress yfinance warnings and errors for cleaner logs
-logging.getLogger('yfinance').setLevel(logging.CRITICAL)
-logging.getLogger('peewee').setLevel(logging.CRITICAL)
-logging.getLogger('urllib3').setLevel(logging.CRITICAL)
-
-from orb_scanner import ORBScanner, ORBSignal
 import os
 import json
 
+from orb_scanner import ORBScanner, ORBSignal
+
+# Reduce noisy loggers
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+logging.getLogger("peewee").setLevel(logging.CRITICAL)
+logging.getLogger("urllib3").setLevel(logging.CRITICAL)
+
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "dashboard_config.json")
+
 
 def load_persisted_config() -> Dict[str, Any]:
     try:
         if os.path.exists(CONFIG_PATH):
-            with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, dict):
                 return data
     except Exception as e:
-        print(f'⚠️ Failed to load persisted config: {e}')
+        print(f"⚠️ Failed to load persisted config: {e}")
     return {}
+
 
 def persist_config(config: Dict[str, Any]) -> None:
     try:
-        with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2)
     except Exception as e:
-        print(f'⚠️ Failed to persist config: {e}')
-
+        print(f"⚠️ Failed to persist config: {e}")
 
 
 # -----------------------------------------------------------------------------
@@ -84,36 +65,43 @@ settings: Dict[str, Any] = {
     "check_interval": 60,
     "sound_alerts": True,
     "desktop_notifications": True,
-
     # Notifications
     "telegram_enabled": False,
     "telegram_bot_token": "",
     "telegram_chat_id": "",
-
     "email_enabled": False,
     "email_smtp_server": "smtp.gmail.com",
     "email_smtp_port": 587,
     "email_sender": "",
     "email_password": "",
     "email_recipient": "",
-
     # UI toggles
     "dark_mode": True,
 }
 
 _persisted = load_persisted_config()
-if isinstance(_persisted.get('settings'), dict):
-    settings.update(_persisted['settings'])
-
+if isinstance(_persisted.get("settings"), dict):
+    settings.update(_persisted["settings"])
 
 active_symbols: List[str] = [
-    "SPY", "QQQ", "DIA", "IWM",
-    "AAPL", "MSFT", "TSLA", "NVDA", "GOOGL", "AMZN",
-    "GLD", "SLV", "USO", "UNG", "VXX",
+    "SPY",
+    "QQQ",
+    "DIA",
+    "IWM",
+    "AAPL",
+    "MSFT",
+    "TSLA",
+    "NVDA",
+    "GOOGL",
+    "AMZN",
+    "GLD",
+    "SLV",
+    "USO",
+    "UNG",
+    "VXX",
 ]
-
-if isinstance(_persisted.get('active_symbols'), list) and _persisted['active_symbols']:
-    active_symbols = [str(s).upper() for s in _persisted['active_symbols']]
+if isinstance(_persisted.get("active_symbols"), list) and _persisted["active_symbols"]:
+    active_symbols = [str(s).upper() for s in _persisted["active_symbols"]]
 
 
 # -----------------------------------------------------------------------------
@@ -203,10 +191,12 @@ def _tz_now(tz_name: str) -> datetime:
     tz = pytz.timezone(tz_name)
     return datetime.now(tz)
 
+
 def _combine_local(date_local: datetime, t: dtime, tz_name: str) -> datetime:
     tz = pytz.timezone(tz_name)
     naive = datetime(date_local.year, date_local.month, date_local.day, t.hour, t.minute, t.second)
     return tz.localize(naive)
+
 
 def _format_td(delta: timedelta) -> str:
     secs = int(abs(delta.total_seconds()))
@@ -217,6 +207,7 @@ def _format_td(delta: timedelta) -> str:
         return f"{h}h {m:02d}m"
     return f"{m}m {s:02d}s"
 
+
 def _session_status(now: datetime, start: datetime, end: datetime) -> Dict[str, Any]:
     if start <= now < end:
         left = end - now
@@ -224,17 +215,13 @@ def _session_status(now: datetime, start: datetime, end: datetime) -> Dict[str, 
     if now < start:
         till = start - now
         return {"state": "closed", "time_to": _format_td(till), "time_left": None}
-    # after end -> next day start
     nxt = start + timedelta(days=1)
     till = nxt - now
     return {"state": "closed", "time_to": _format_td(till), "time_left": None}
 
+
 def get_global_market_status() -> Dict[str, Any]:
-    """Return status for key trading sessions across timezones.
-    Times are *local session times*; we treat Mon-Fri as active days for countdown display.
-    """
     sessions = [
-        # name, tz, start, end, note
         ("Tokyo", "Asia/Tokyo", dtime(9, 0), dtime(15, 0), "TSE cash"),
         ("Hong Kong", "Asia/Hong_Kong", dtime(9, 30), dtime(16, 0), "HKEX cash"),
         ("London", "Europe/London", dtime(8, 0), dtime(16, 30), "LSE cash"),
@@ -249,7 +236,6 @@ def get_global_market_status() -> Dict[str, Any]:
         now = _tz_now(tz)
         start = _combine_local(now, st, tz)
         end = _combine_local(now, en, tz)
-
         status = _session_status(now, start, end)
         out.append(
             {
@@ -264,46 +250,40 @@ def get_global_market_status() -> Dict[str, Any]:
             }
         )
 
-    any_open = any(s["state"] == "open" for s in out)
-    return {"any_open": any_open, "sessions": out}
+    return {"any_open": any(s["state"] == "open" for s in out), "sessions": out}
 
 
 # -----------------------------------------------------------------------------
 # Scanner
 # -----------------------------------------------------------------------------
 class FusedDashboardScanner(ORBScanner):
-    """Scanner with: pro analytics + control + notifications."""
-
     def __init__(self, *args, notification_manager=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.last_update = datetime.now(self.timezone)
         self.notification_manager = notification_manager
 
         self.price_history: Dict[str, List[Dict[str, Any]]] = {symbol: [] for symbol in self.symbols}
-        self.daily_stats = {
+        self.daily_stats: Dict[str, Any] = {
             "total_signals": 0,
             "long_signals": 0,
             "short_signals": 0,
             "symbols_with_or": 0,
+            "active_breakouts": 0,
         }
         self.stats_reset_date = datetime.now(self.timezone).date()
 
-        # Defensive init: ensure per-symbol dicts exist for all configured symbols (prevents KeyError on reload/connect)
+        # Defensive init: ensure per-symbol dicts exist
         for symbol in list(self.symbols):
-            if symbol not in self.or_data:
-                self.or_data[symbol] = {"high": None, "low": None, "mid": None, "captured": False}
-            if symbol not in self.breakout_state:
-                self.breakout_state[symbol] = {
-                    "long_breakout_active": False,
-                    "short_breakout_active": False,
-                    "was_in_zone": True,
-                    "last_check": None,
-                }
-            if symbol not in self.signals_today:
-                self.signals_today[symbol] = []
+            self.or_data.setdefault(symbol, {"high": None, "low": None, "mid": None, "captured": False})
+            self.breakout_state.setdefault(
+                symbol,
+                {"long_breakout_active": False, "short_breakout_active": False, "was_in_zone": True, "last_check": None},
+            )
+            self.signals_today.setdefault(symbol, [])
 
     def update_symbols(self, new_symbols: List[str]):
-        # Remove old symbols
+        new_symbols = [str(s).upper().strip() for s in new_symbols if str(s).strip()]
+        # Remove old
         for symbol in list(self.symbols):
             if symbol not in new_symbols:
                 self.or_data.pop(symbol, None)
@@ -311,7 +291,7 @@ class FusedDashboardScanner(ORBScanner):
                 self.signals_today.pop(symbol, None)
                 self.price_history.pop(symbol, None)
 
-        # Add new symbols
+        # Add new
         for symbol in new_symbols:
             if symbol not in self.symbols:
                 self.or_data[symbol] = {"high": None, "low": None, "mid": None, "captured": False}
@@ -331,19 +311,14 @@ class FusedDashboardScanner(ORBScanner):
         prices: Dict[str, Optional[float]] = {}
         for symbol in self.symbols:
             try:
-                ticker = yf.Ticker(symbol)
-                data = ticker.history(period="1d", interval="1m")
-                if not data.empty:
-                    prices[symbol] = round(float(data["Close"].iloc[-1]), 2)
-                else:
-                    prices[symbol] = None
+                t = yf.Ticker(symbol)
+                df = t.history(period="1d", interval="1m")
+                prices[symbol] = round(float(df["Close"].iloc[-1]), 2) if df is not None and not df.empty else None
             except Exception:
-                # Silently fail - don't spam logs for temporary failures
                 prices[symbol] = None
         return prices
 
     def scan_all_symbols(self) -> List[ORBSignal]:
-        # Check if we need to reset daily stats (new trading day)
         today = datetime.now(self.timezone).date()
         if today != self.stats_reset_date:
             print(f"📊 Resetting daily stats for new trading day: {today}")
@@ -352,9 +327,10 @@ class FusedDashboardScanner(ORBScanner):
                 "long_signals": 0,
                 "short_signals": 0,
                 "symbols_with_or": 0,
+                "active_breakouts": 0,
             }
             self.stats_reset_date = today
-        
+
         signals = super().scan_all_symbols()
 
         for signal in signals:
@@ -390,43 +366,27 @@ class FusedDashboardScanner(ORBScanner):
                 },
             )
 
-        # Update stats
+        # Update derived stats
         active_breakouts = 0
         symbols_with_or = 0
-        active_symbols = 0
         for symbol in self.symbols:
             state = self.breakout_state.get(symbol) or {}
             or_info = self.or_data.get(symbol) or {}
             if state.get("long_breakout_active") or state.get("short_breakout_active"):
                 active_breakouts += 1
-                active_symbols += 1
             if or_info.get("captured"):
                 symbols_with_or += 1
         self.daily_stats["active_breakouts"] = active_breakouts
         self.daily_stats["symbols_with_or"] = symbols_with_or
 
         self.last_update = datetime.now(self.timezone)
-        socketio.emit("status_update", self.get_comprehensive_status())
-
-        prices = self.get_current_prices()
-        socketio.emit("price_update", prices)
-
-        # Global market session status
-        socketio.emit("market_sessions", get_global_market_status())
-
         return signals
 
     def _send_signal_notifications(self, signal: ORBSignal):
         if settings.get("telegram_enabled") and settings.get("telegram_bot_token") and settings.get("telegram_chat_id"):
             message = NotificationManager.format_signal_message(signal, "telegram")
             try:
-                asyncio.run(
-                    NotificationManager.send_telegram(
-                        settings["telegram_bot_token"],
-                        settings["telegram_chat_id"],
-                        message,
-                    )
-                )
+                asyncio.run(NotificationManager.send_telegram(settings["telegram_bot_token"], settings["telegram_chat_id"], message))
             except Exception as e:
                 print(f"Telegram notification failed: {e}")
 
@@ -453,23 +413,23 @@ class FusedDashboardScanner(ORBScanner):
             "daily_stats": self.daily_stats,
             "symbols": {},
             "settings": settings,
-            "active_symbols": active_symbols,
+            "active_symbols": list(self.symbols),
         }
 
         for symbol in self.symbols:
             or_info = self.or_data.get(symbol) or {}
             state = self.breakout_state.get(symbol) or {}
-
-            or_range = (or_info["high"] - or_info["low"]) if or_info["high"] else None
+            hi, lo = or_info.get("high"), or_info.get("low")
+            or_range = (hi - lo) if (hi is not None and lo is not None) else None
 
             status["symbols"][symbol] = {
-                "or_captured": bool(or_info["captured"]),
-                "or_high": round(or_info["high"], 2) if or_info["high"] else None,
-                "or_low": round(or_info["low"], 2) if or_info["low"] else None,
-                "or_mid": round(or_info["mid"], 2) if or_info["mid"] else None,
+                "or_captured": bool(or_info.get("captured")),
+                "or_high": round(hi, 2) if hi is not None else None,
+                "or_low": round(lo, 2) if lo is not None else None,
+                "or_mid": round(or_info.get("mid"), 2) if or_info.get("mid") is not None else None,
                 "or_range": round(or_range, 2) if or_range is not None else None,
-                "long_breakout_active": bool(state["long_breakout_active"]),
-                "short_breakout_active": bool(state["short_breakout_active"]),
+                "long_breakout_active": bool(state.get("long_breakout_active")),
+                "short_breakout_active": bool(state.get("short_breakout_active")),
                 "signals_count": len(self.signals_today.get(symbol, [])),
                 "signals": [
                     {
@@ -499,24 +459,31 @@ class FusedDashboardScanner(ORBScanner):
 def scanner_background_task():
     global scanner
     print("📡 Scanner background task started")
+    last_status_emit = 0.0
 
     while True:
         try:
             if scanner:
+                # Always update sessions & prices so UI cards fill even when ORB paused
+                socketio.emit("market_sessions", get_global_market_status())
+                socketio.emit("price_update", scanner.get_current_prices())
+
+                # ORB scan only during trading hours
                 if scanner.is_trading_hours():
                     scanner.scan_all_symbols()
-                else:
-                    socketio.emit(
-                        "heartbeat",
-                        {"status": "offline", "message": "Market closed", "time": datetime.now().isoformat()},
-                    )
-                    # still emit sessions even off-hours
-                    socketio.emit("market_sessions", get_global_market_status())
+
+                # Emit status_update at least every ~10s so UI never hangs
+                now = time.time()
+                if now - last_status_emit > 10:
+                    scanner.last_update = datetime.now(scanner.timezone)
+                    socketio.emit("status_update", scanner.get_comprehensive_status())
+                    last_status_emit = now
+
             time.sleep(int(scanner.check_interval) if scanner else 60)
         except Exception as e:
             print(f"❌ Error in scanner task: {e}")
             socketio.emit("error", {"message": str(e)})
-            time.sleep(60)
+            time.sleep(5)
 
 
 # -----------------------------------------------------------------------------
@@ -526,11 +493,13 @@ def scanner_background_task():
 def index():
     return render_template("dashboard_fused.html")
 
+
 @app.route("/api/status")
 def api_status():
     if scanner:
         return jsonify(scanner.get_comprehensive_status())
     return jsonify({"error": "Scanner not initialized"}), 400
+
 
 @app.route("/api/settings", methods=["GET", "POST"])
 def api_settings():
@@ -544,9 +513,12 @@ def api_settings():
         if scanner and "check_interval" in data:
             scanner.check_interval = int(data["check_interval"])
 
-        socketio.emit("settings_updated", settings)
+        persist_config({"settings": settings, "active_symbols": active_symbols})
+        socketio.emit("settings_update", {"settings": settings})
+        socketio.emit("status_update", scanner.get_comprehensive_status() if scanner else {})
         return jsonify({"success": True, "settings": settings})
     return jsonify(settings)
+
 
 @app.route("/api/symbols", methods=["GET", "POST", "DELETE"])
 def api_symbols():
@@ -563,36 +535,28 @@ def api_symbols():
     if request.method == "POST":
         if symbol in active_symbols:
             return jsonify({"error": "Symbol already exists"}), 400
-        
-        # Reject invalid symbol formats (futures, indices with !, etc.)
-        if not symbol or len(symbol) > 10 or any(c in symbol for c in ['!', '=']):
+
+        if len(symbol) > 10 or any(c in symbol for c in ["!", "="]):
             return jsonify({"error": "Invalid symbol format. Use regular stock/ETF tickers only (no futures/indices)."}), 400
-        
+
         try:
             t = yf.Ticker(symbol)
-            # Try to fetch recent data to validate symbol exists
             hist = t.history(period="5d", interval="1d")
             if hist is None or hist.empty:
                 return jsonify({"error": f"Symbol {symbol} not found or no data available"}), 400
-            
-            # Verify we can get current intraday data
-            current_data = t.history(period="1d", interval="1m")
-            if current_data is None or current_data.empty:
+            cur = t.history(period="1d", interval="1m")
+            if cur is None or cur.empty:
                 return jsonify({"error": f"Symbol {symbol} exists but has no intraday data available"}), 400
-                
         except Exception as e:
             return jsonify({"error": f"Symbol validation failed: {str(e)}"}), 400
 
         active_symbols.append(symbol)
         if scanner:
             scanner.update_symbols(active_symbols)
+
         persist_config({"settings": settings, "active_symbols": active_symbols})
         socketio.emit("symbols_updated", {"symbols": active_symbols})
-        try:
-            if scanner:
-                socketio.emit("status_update", scanner.get_comprehensive_status())
-        except Exception as e:
-            print(f"⚠️ Failed to emit status_update after adding symbol: {e}")
+        socketio.emit("status_update", scanner.get_comprehensive_status() if scanner else {})
         return jsonify({"success": True, "symbols": active_symbols})
 
     # DELETE
@@ -601,13 +565,12 @@ def api_symbols():
     active_symbols.remove(symbol)
     if scanner:
         scanner.update_symbols(active_symbols)
+
     persist_config({"settings": settings, "active_symbols": active_symbols})
     socketio.emit("symbols_updated", {"symbols": active_symbols})
-    try:
-        socketio.emit("status_update", scanner.get_comprehensive_status() if scanner else {})
-    except Exception:
-        pass
+    socketio.emit("status_update", scanner.get_comprehensive_status() if scanner else {})
     return jsonify({"success": True, "symbols": active_symbols})
+
 
 @app.route("/api/test-telegram", methods=["POST"])
 def api_test_telegram():
@@ -622,6 +585,7 @@ def api_test_telegram():
         return jsonify({"success": bool(ok), "message": "Test message sent!" if ok else "Failed to send message"}), (200 if ok else 500)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 
 @app.route("/api/test-email", methods=["POST"])
 def api_test_email():
@@ -652,6 +616,7 @@ def api_test_email():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 @app.route("/api/start")
 def api_start():
     global scanner, scanner_thread
@@ -665,23 +630,37 @@ def api_start():
         )
         scanner_thread = Thread(target=scanner_background_task, daemon=True)
         scanner_thread.start()
-        return jsonify({"status": "started", "symbols": len(active_symbols)})
-    return jsonify({"status": "already_running"})
+
+    # Always push an immediate status so UI can render right away
+    try:
+        socketio.emit("symbols_updated", {"symbols": active_symbols})
+        socketio.emit("settings_update", {"settings": settings})
+        socketio.emit("market_sessions", get_global_market_status())
+        socketio.emit("price_update", scanner.get_current_prices() if scanner else {})
+        socketio.emit("status_update", scanner.get_comprehensive_status() if scanner else {})
+    except Exception as e:
+        print(f"⚠️ api_start emit failed: {e}")
+
+    return jsonify({"status": "started", "symbols": len(active_symbols)})
+
 
 @app.route("/api/restart")
 def api_restart():
     global scanner
     if scanner:
         scanner.update_symbols(active_symbols)
+        socketio.emit("symbols_updated", {"symbols": active_symbols})
+        socketio.emit("status_update", scanner.get_comprehensive_status())
         return jsonify({"status": "restarted", "symbols": len(active_symbols)})
     return api_start()
+
 
 @app.route("/api/prices/<symbol>")
 def api_symbol_prices(symbol: str):
     symbol = symbol.upper().strip()
     try:
-        ticker = yf.Ticker(symbol)
-        df = ticker.history(period="1d", interval="1m")
+        t = yf.Ticker(symbol)
+        df = t.history(period="1d", interval="1m")
         if df is None or df.empty:
             return jsonify({"error": "No data"}), 404
         return jsonify(
@@ -696,25 +675,52 @@ def api_symbol_prices(symbol: str):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 @app.route("/api/symbol/<symbol>/stats")
 def api_symbol_stats(symbol: str):
     symbol = symbol.upper().strip()
     try:
         t = yf.Ticker(symbol)
         info = getattr(t, "info", {}) or {}
-        # Keep it small & stable for the UI
         keys = [
-            "shortName", "longName", "symbol", "quoteType", "currency", "exchange",
-            "regularMarketPrice", "regularMarketChange", "regularMarketChangePercent",
-            "regularMarketDayHigh", "regularMarketDayLow",
-            "fiftyTwoWeekHigh", "fiftyTwoWeekLow",
-            "marketCap", "trailingPE", "forwardPE", "dividendYield", "beta",
-            "averageVolume", "averageVolume10days",
+            "shortName",
+            "longName",
+            "symbol",
+            "quoteType",
+            "currency",
+            "exchange",
+            "regularMarketPrice",
+            "regularMarketChange",
+            "regularMarketChangePercent",
+            "regularMarketDayHigh",
+            "regularMarketDayLow",
+            "fiftyTwoWeekHigh",
+            "fiftyTwoWeekLow",
+            "marketCap",
+            "trailingPE",
+            "forwardPE",
+            "dividendYield",
+            "beta",
+            "averageVolume",
+            "averageVolume10days",
         ]
         filtered = {k: info.get(k) for k in keys if k in info}
         return jsonify({"symbol": symbol, "info": filtered})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.get("/api/diag/<symbol>")
+def diag(symbol):
+    t = yf.Ticker(symbol)
+    df = t.history(period="1d", interval="1m")
+    return {
+        "symbol": symbol,
+        "rows": int(len(df)),
+        "cols": list(df.columns),
+        "last_index": None if df.empty else str(df.index[-1]),
+        "last_close": None if df.empty else float(df["Close"].iloc[-1]),
+    }
 
 
 # -----------------------------------------------------------------------------
@@ -723,25 +729,27 @@ def api_symbol_stats(symbol: str):
 @socketio.on("connect")
 def on_connect(auth=None):
     print(f"✅ Client connected: {request.sid}")
+
+    # Always send basic data immediately (even if scanner not started yet)
     emit("symbols_updated", {"symbols": active_symbols})
     emit("settings_update", {"settings": settings})
+    try:
+        emit("market_sessions", get_global_market_status())
+    except Exception:
+        pass
+
     if scanner:
         try:
-            status = scanner.get_comprehensive_status()
-            emit("status_update", status)
-        except Exception as e:
-            print(f"⚠️ status_update failed on connect: {e}")
-            # Send minimal status to avoid blocking UI
-            emit("status_update", {
-                "daily_stats": scanner.daily_stats if hasattr(scanner, 'daily_stats') else {},
-                "symbols": {},
-                "error": str(e)
-            })
+            emit("price_update", scanner.get_current_prices())
+        except Exception:
+            pass
         try:
-            emit("market_sessions", get_global_market_status())
+            emit("status_update", scanner.get_comprehensive_status())
         except Exception as e:
-            print(f"⚠️ market_sessions failed: {e}")
-        emit("connected", {"message": "Connected to ORB Scanner"})
+            emit("status_update", {"daily_stats": getattr(scanner, "daily_stats", {}), "symbols": {}, "error": str(e)})
+
+    emit("connected", {"message": "Connected to ORB Scanner"})
+
 
 @socketio.on("disconnect")
 def on_disconnect():
@@ -749,10 +757,9 @@ def on_disconnect():
 
 
 # -----------------------------------------------------------------------------
-# HTML template generator (Pro style + Control features)
+# HTML template generator
 # -----------------------------------------------------------------------------
 def create_fused_dashboard_html() -> str:
-    # Keep it as a single-file template for easy running.
     return """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -843,35 +850,6 @@ def create_fused_dashboard_html() -> str:
     .card-title { font-size: 1.05rem; font-weight: 700; display:flex; align-items:center; gap:.5rem; }
     .muted { color: var(--text-secondary); font-size: .875rem; }
     .signals-feed { grid-column: 1 / -1; }
-
-    .signal-item {
-      background: var(--bg-tertiary);
-      padding: 1rem;
-      border-radius: 10px;
-      margin-bottom: .9rem;
-      border-left: 4px solid var(--accent-blue);
-      animation: slideIn .25s ease-out;
-    }
-    .signal-item.long { border-left-color: var(--accent-green); }
-    .signal-item.short { border-left-color: var(--accent-red); }
-    @keyframes slideIn { from {opacity:0; transform: translateX(-14px);} to {opacity:1; transform:none;} }
-
-    .signal-header { display:flex; justify-content: space-between; align-items:center; margin-bottom: .35rem; }
-    .signal-symbol { font-size: 1.15rem; font-weight: 800; }
-    .signal-type {
-      padding: .25rem .7rem;
-      border-radius: 999px;
-      font-size: .72rem;
-      font-weight: 800;
-      text-transform: uppercase;
-      letter-spacing: .05em;
-    }
-    .signal-type.long { background: var(--accent-green); color: white; }
-    .signal-type.short { background: var(--accent-red); color: white; }
-    .signal-details { display:grid; grid-template-columns: repeat(4, 1fr); gap: .75rem; margin-top: .8rem; }
-    .signal-detail { text-align:center; }
-    .signal-detail-label { font-size: .72rem; color: var(--text-secondary); margin-bottom: .2rem; }
-    .signal-detail-value { font-size: 1.05rem; font-weight: 800; }
 
     .symbols-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 1rem; }
     .symbol-card {
@@ -974,7 +952,7 @@ def create_fused_dashboard_html() -> str:
 
     @media (max-width: 1200px) { .dashboard-grid { grid-template-columns: 1fr 1fr; } }
     @media (max-width: 900px) { .dashboard-grid { grid-template-columns: 1fr; } .header-stats { display:none; } .kv { grid-template-columns: 1fr 1fr; } }
-    @media (max-width: 560px) { .signal-details { grid-template-columns: 1fr 1fr; } .kv { grid-template-columns: 1fr; } }
+    @media (max-width: 560px) { .kv { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -992,7 +970,7 @@ def create_fused_dashboard_html() -> str:
         <div class="stat-item"><div class="stat-label">Total Signals</div><div class="stat-value blue" id="total-signals">0</div></div>
         <div class="stat-item"><div class="stat-label">Long</div><div class="stat-value green" id="long-signals">0</div></div>
         <div class="stat-item"><div class="stat-label">Short</div><div class="stat-value red" id="short-signals">0</div></div>
-</div>
+      </div>
 
       <div class="connection-status">
         <div class="status-dot" id="conn-dot"></div>
@@ -1003,7 +981,6 @@ def create_fused_dashboard_html() -> str:
 
   <div class="container">
     <div class="dashboard-grid">
-      <!-- Signals Feed -->
       <div class="card signals-feed">
         <div class="card-header">
           <div class="card-title"><i class="fas fa-bell"></i> Recent Signals</div>
@@ -1018,7 +995,6 @@ def create_fused_dashboard_html() -> str:
         </div>
       </div>
 
-      <!-- Settings -->
       <div class="card">
         <div class="card-header">
           <div class="card-title"><i class="fas fa-cog"></i> Settings</div>
@@ -1060,7 +1036,6 @@ def create_fused_dashboard_html() -> str:
 
           <div class="hr"></div>
 
-          <!-- Symbol management -->
           <div class="setting-item">
             <label class="setting-label">Add Symbol</label>
             <div class="btn-row">
@@ -1072,7 +1047,6 @@ def create_fused_dashboard_html() -> str:
 
           <div class="hr"></div>
 
-          <!-- Telegram -->
           <div class="setting-item">
             <label class="setting-label" style="display:flex; justify-content: space-between; align-items:center;">
               Telegram Notifications
@@ -1089,7 +1063,6 @@ def create_fused_dashboard_html() -> str:
             </div>
           </div>
 
-          <!-- Email -->
           <div class="setting-item">
             <label class="setting-label" style="display:flex; justify-content: space-between; align-items:center;">
               Email Notifications
@@ -1111,7 +1084,6 @@ def create_fused_dashboard_html() -> str:
         </div>
       </div>
 
-      <!-- Market Status (multi sessions) -->
       <div class="card">
         <div class="card-header">
           <div class="card-title"><i class="fas fa-clock"></i> Market Status</div>
@@ -1130,7 +1102,6 @@ def create_fused_dashboard_html() -> str:
         </div>
       </div>
 
-      <!-- Activity Chart -->
       <div class="card">
         <div class="card-header">
           <div class="card-title"><i class="fas fa-chart-bar"></i> Today's Activity</div>
@@ -1141,7 +1112,6 @@ def create_fused_dashboard_html() -> str:
       </div>
     </div>
 
-    <!-- Symbols Grid -->
     <div class="card">
       <div class="card-header">
         <div class="card-title"><i class="fas fa-list"></i> Monitored Symbols</div>
@@ -1156,7 +1126,7 @@ def create_fused_dashboard_html() -> str:
     </div>
   </div>
 
-  <!-- Symbol modal -->
+  <!-- Symbol modal (kept from your original) -->
   <div class="modal-backdrop" id="modal-backdrop" onclick="closeModal(event)">
     <div class="modal" onclick="event.stopPropagation()">
       <div class="modal-header">
@@ -1200,27 +1170,34 @@ def create_fused_dashboard_html() -> str:
     const socket = io();
 
     let allSignals = [];
-    let symbolsData = {};
+    let symbolsData = {};   // from status_update.symbols
     let settings = {};
     let activityChart = null;
 
     let sessionsData = null;
-
     let currentPrices = {};
     let currentModalSymbol = null;
     let symbolChart = null;
 
-    // Init
-    document.addEventListener('DOMContentLoaded', () => {
+    document.addEventListener('DOMContentLoaded', async () => {
       initializeActivityChart();
       requestNotificationPermission();
       startEtClock();
 
-      // Start scanner
-      fetch('/api/start').then(r => r.json()).then(() => {});
+      // Start scanner (server will emit status/symbols right away)
+      await fetch('/api/start').catch(()=>{});
+
+      // Poll fallback: if sockets fail, still populate UI
+      setInterval(async () => {
+        try {
+          const r = await fetch('/api/status');
+          const data = await r.json();
+          if (!data || data.error) return;
+          handleStatusUpdate(data);
+        } catch (e) {}
+      }, 5000);
     });
 
-    // Socket handlers
     socket.on('connect', () => {
       document.getElementById('connection-text').textContent = 'Connected';
       document.getElementById('conn-dot').style.background = 'var(--accent-green)';
@@ -1230,6 +1207,57 @@ def create_fused_dashboard_html() -> str:
       document.getElementById('connection-text').textContent = 'Disconnected';
       document.getElementById('conn-dot').style.background = 'var(--accent-red)';
     });
+
+    socket.on('symbols_updated', (payload) => {
+      // IMPORTANT: render something even before status_update arrives
+      const syms = (payload && payload.symbols) ? payload.symbols : [];
+      if (!syms.length) return;
+
+      // If we don't have symbolsData yet, create placeholder entries
+      if (!symbolsData || Object.keys(symbolsData).length === 0) {
+        const obj = {};
+        syms.forEach(s => {
+          obj[s] = obj[s] || {
+            or_captured: false,
+            or_low: null,
+            or_high: null,
+            long_breakout_active: false,
+            short_breakout_active: false,
+            signals_count: 0,
+            signals: []
+          };
+        });
+        symbolsData = obj;
+        updateSymbolsDisplay(); // removes spinner
+      }
+    });
+
+    socket.on('settings_update', (payload) => {
+      // server emits {settings: {...}}
+      const s = payload && payload.settings ? payload.settings : payload;
+      settings = s || settings;
+      hydrateSettingsPanel(settings);
+    });
+
+    socket.on('status_update', (status) => handleStatusUpdate(status));
+
+    function handleStatusUpdate(status) {
+      const stats = status.daily_stats || {};
+      document.getElementById('total-signals').textContent = stats.total_signals ?? 0;
+      document.getElementById('long-signals').textContent = stats.long_signals ?? 0;
+      document.getElementById('short-signals').textContent = stats.short_signals ?? 0;
+
+      if (status.last_update) {
+        const updateTime = new Date(status.last_update);
+        document.getElementById('last-update').textContent = `Last update: ${updateTime.toLocaleTimeString()}`;
+      }
+
+      symbolsData = status.symbols || symbolsData || {};
+      settings = status.settings || settings;
+
+      hydrateSettingsPanel(settings);
+      updateSymbolsDisplay();
+    }
 
     socket.on('new_signal', (signal) => {
       allSignals.unshift(signal);
@@ -1243,25 +1271,9 @@ def create_fused_dashboard_html() -> str:
 
       updateSignalsDisplay();
       updateActivityChart();
-      // If modal open for this symbol, refresh signals section
       if (currentModalSymbol && currentModalSymbol === signal.symbol) {
         refreshModalSignals();
       }
-    });
-
-    socket.on('status_update', (status) => {
-      const stats = status.daily_stats || {};
-      document.getElementById('total-signals').textContent = stats.total_signals ?? 0;
-      document.getElementById('long-signals').textContent = stats.long_signals ?? 0;
-      document.getElementById('short-signals').textContent = stats.short_signals ?? 0;
-      const updateTime = new Date(status.last_update);
-      document.getElementById('last-update').textContent = `Last update: ${updateTime.toLocaleTimeString()}`;
-
-      symbolsData = status.symbols || {};
-      settings = status.settings || settings;
-
-      hydrateSettingsPanel(settings);
-      updateSymbolsDisplay();
     });
 
     socket.on('price_update', (prices) => {
@@ -1272,7 +1284,6 @@ def create_fused_dashboard_html() -> str:
       });
 
       if (currentModalSymbol && currentPrices[currentModalSymbol]) {
-        // soft update one field in modal if present
         const v = document.querySelector('[data-k="regularMarketPrice"] .v');
         if (v) v.textContent = `$${currentPrices[currentModalSymbol]}`;
       }
@@ -1283,7 +1294,6 @@ def create_fused_dashboard_html() -> str:
       renderSessions(payload);
     });
 
-    // UI render
     function updateSignalsDisplay() {
       const container = document.getElementById('signals-container');
       if (allSignals.length === 0) {
@@ -1296,17 +1306,17 @@ def create_fused_dashboard_html() -> str:
       }
 
       container.innerHTML = allSignals.slice(0, 25).map(signal => `
-        <div class="signal-item ${signal.type.toLowerCase()}">
-          <div class="signal-header">
-            <div class="signal-symbol">${signal.symbol}</div>
-            <div class="signal-type ${signal.type.toLowerCase()}">${signal.type}</div>
+        <div class="card" style="background: var(--bg-tertiary); border-radius: 10px; padding: 1rem; margin-bottom: .9rem; border-left: 4px solid ${signal.type==='LONG'?'var(--accent-green)':'var(--accent-red)'};">
+          <div style="display:flex; justify-content: space-between; align-items:center;">
+            <div style="font-size: 1.15rem; font-weight: 900;">${signal.symbol}</div>
+            <div style="padding:.25rem .7rem; border-radius:999px; font-size:.72rem; font-weight:900; color:white; background:${signal.type==='LONG'?'var(--accent-green)':'var(--accent-red)'};">${signal.type}</div>
           </div>
           <div class="muted">${signal.time_display}</div>
-          <div class="signal-details">
-            <div class="signal-detail"><div class="signal-detail-label">Entry</div><div class="signal-detail-value">$${signal.entry}</div></div>
-            <div class="signal-detail"><div class="signal-detail-label">Stop</div><div class="signal-detail-value">$${signal.stop}</div></div>
-            <div class="signal-detail"><div class="signal-detail-label">Target</div><div class="signal-detail-value">$${signal.target}</div></div>
-            <div class="signal-detail"><div class="signal-detail-label">Range</div><div class="signal-detail-value">$${signal.range_size}</div></div>
+          <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:.75rem; margin-top:.8rem; text-align:center;">
+            <div><div class="muted" style="font-size:.72rem;">Entry</div><div style="font-weight:900;">$${signal.entry}</div></div>
+            <div><div class="muted" style="font-size:.72rem;">Stop</div><div style="font-weight:900;">$${signal.stop}</div></div>
+            <div><div class="muted" style="font-size:.72rem;">Target</div><div style="font-weight:900;">$${signal.target}</div></div>
+            <div><div class="muted" style="font-size:.72rem;">Range</div><div style="font-weight:900;">$${signal.range_size}</div></div>
           </div>
         </div>
       `).join('');
@@ -1316,7 +1326,14 @@ def create_fused_dashboard_html() -> str:
       const container = document.getElementById('symbols-grid');
 
       const entries = Object.entries(symbolsData || {});
-      if (entries.length === 0) return;
+      if (entries.length === 0) {
+        container.innerHTML = `
+          <div class="empty-state">
+            <i class="fas fa-circle-info"></i>
+            <div>No symbols yet</div>
+          </div>`;
+        return;
+      }
 
       container.innerHTML = entries.map(([symbol, data]) => {
         let statusText = 'Watching';
@@ -1336,7 +1353,7 @@ def create_fused_dashboard_html() -> str:
             </div>
             <div class="symbol-or">${orText}</div>
             <div class="symbol-status ${statusClass}">${statusText}</div>
-            ${data.signals_count > 0 ? `<div style="margin-top:.5rem; font-size:.75rem; color: var(--accent-green); font-weight:800;">${data.signals_count} signal(s)</div>` : ''}
+            ${data.signals_count > 0 ? `<div style="margin-top:.5rem; font-size:.75rem; color: var(--accent-green); font-weight:900;">${data.signals_count} signal(s)</div>` : ''}
           </div>
         `;
       }).join('');
@@ -1344,7 +1361,6 @@ def create_fused_dashboard_html() -> str:
 
     function hydrateSettingsPanel(s) {
       if (!s) return;
-      // Only hydrate once unless values differ; keep it simple.
       document.getElementById('breakout-distance').value = s.breakout_distance ?? 2.0;
       document.getElementById('check-interval').value = s.check_interval ?? 60;
       document.getElementById('sound-alerts').checked = !!s.sound_alerts;
@@ -1367,7 +1383,6 @@ def create_fused_dashboard_html() -> str:
       if (!payload || !payload.sessions) return;
       const anyOpen = !!payload.any_open;
 
-      // Use NY time for the big clock (keeps vibe consistent with ORB/US markets)
       const now = new Date();
       const etTime = new Date(now.toLocaleString("en-US", {timeZone: "America/New_York"}));
       document.getElementById('market-clock').textContent = etTime.toLocaleTimeString();
@@ -1392,18 +1407,13 @@ def create_fused_dashboard_html() -> str:
       }).join('');
     }
 
-    // Charts
     function initializeActivityChart() {
       const ctx = document.getElementById('activityChart');
       activityChart = new Chart(ctx, {
         type: 'bar',
-        data: {
-          labels: ['Long', 'Short'],
-          datasets: [{ label: 'Signals', data: [0, 0] }]
-        },
+        data: { labels: ['Long', 'Short'], datasets: [{ label: 'Signals', data: [0, 0] }] },
         options: {
-          responsive: true,
-          maintainAspectRatio: false,
+          responsive: true, maintainAspectRatio: false,
           plugins: { legend: { display: false } },
           scales: {
             y: { beginAtZero: true, ticks: { stepSize: 1, color: '#cbd5e1' }, grid: { color: '#475569' } },
@@ -1422,26 +1432,19 @@ def create_fused_dashboard_html() -> str:
       }
     }
 
-    // Market clock tick
     function startEtClock() {
-      setInterval(() => {
-        // Keep big clock alive even if websocket is quiet
-        if (sessionsData) renderSessions(sessionsData);
-      }, 1000);
+      setInterval(() => { if (sessionsData) renderSessions(sessionsData); }, 1000);
     }
 
-    // Settings + symbol actions
     async function saveSettings(silent=false) {
       const newSettings = {
         breakout_distance: parseFloat(document.getElementById('breakout-distance').value),
         check_interval: parseInt(document.getElementById('check-interval').value),
         sound_alerts: document.getElementById('sound-alerts').checked,
         desktop_notifications: document.getElementById('desktop-notifications').checked,
-
         telegram_enabled: document.getElementById('telegram-enabled').checked,
         telegram_bot_token: document.getElementById('telegram-token').value,
         telegram_chat_id: document.getElementById('telegram-chat-id').value,
-
         email_enabled: document.getElementById('email-enabled').checked,
         email_smtp_server: document.getElementById('email-smtp').value,
         email_smtp_port: parseInt(document.getElementById('email-port').value),
@@ -1461,11 +1464,8 @@ def create_fused_dashboard_html() -> str:
       if (!symbol) return;
       const r = await fetch('/api/symbols', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({symbol}) });
       const data = await r.json().catch(() => ({}));
-      if (data.success) {
-        input.value = '';
-      } else {
-        alert(data.error || 'Failed to add symbol');
-      }
+      if (data.success) input.value = '';
+      else alert(data.error || 'Failed to add symbol');
     }
 
     async function removeSymbol(symbol) {
@@ -1500,7 +1500,6 @@ def create_fused_dashboard_html() -> str:
       status.textContent = data.success ? '✅ Sent! Check inbox.' : `❌ ${data.error || data.message || 'Failed'}`;
     }
 
-    // Notifications
     function requestNotificationPermission() {
       if (Notification.permission === 'default') Notification.requestPermission();
     }
@@ -1510,23 +1509,20 @@ def create_fused_dashboard_html() -> str:
       audio.play().catch(() => {});
     }
 
-    // Modal
+    // Modal (same logic as your original)
     function openSymbolModal(symbol) {
       currentModalSymbol = symbol;
       document.getElementById('modal-title').textContent = symbol;
       document.getElementById('modal-backdrop').style.display = 'flex';
       document.body.style.overflow = 'hidden';
-
       refreshModal();
     }
-
     function closeModal(e) {
       document.getElementById('modal-backdrop').style.display = 'none';
       document.body.style.overflow = 'auto';
       currentModalSymbol = null;
       if (symbolChart) { symbolChart.destroy(); symbolChart = null; }
     }
-
     async function removeCurrentSymbol() {
       if (!currentModalSymbol) return;
       if (!confirm(`Remove ${currentModalSymbol}?`)) return;
@@ -1534,12 +1530,10 @@ def create_fused_dashboard_html() -> str:
       if (out.success) closeModal();
       else alert(out.error || 'Failed to remove symbol');
     }
-
     async function refreshModal() {
       if (!currentModalSymbol) return;
       await Promise.all([refreshModalStats(), refreshModalChart(), refreshModalSignals()]);
     }
-
     async function refreshModalStats() {
       const kv = document.getElementById('modal-kv');
       kv.innerHTML = '';
@@ -1548,7 +1542,6 @@ def create_fused_dashboard_html() -> str:
         const data = await r.json();
         if (data.error) throw new Error(data.error);
         const info = data.info || {};
-
         const rows = [
           ['regularMarketPrice', info.regularMarketPrice != null ? `$${info.regularMarketPrice}` : (currentPrices[currentModalSymbol] ? `$${currentPrices[currentModalSymbol]}` : '--')],
           ['regularMarketChange', info.regularMarketChange != null ? `${info.regularMarketChange}` : '--'],
@@ -1563,7 +1556,6 @@ def create_fused_dashboard_html() -> str:
           ['avgVolume', info.averageVolume != null ? fmtBig(info.averageVolume) : '--'],
           ['exchange', info.exchange || '--'],
         ];
-
         kv.innerHTML = rows.map(([k,v]) => `
           <div class="item" data-k="${k}">
             <div class="k">${niceKey(k)}</div>
@@ -1574,7 +1566,6 @@ def create_fused_dashboard_html() -> str:
         kv.innerHTML = `<div class="muted">Failed to load stats: ${err}</div>`;
       }
     }
-
     async function refreshModalChart() {
       const status = document.getElementById('modal-chart-status');
       status.textContent = 'Loading...';
@@ -1601,24 +1592,20 @@ def create_fused_dashboard_html() -> str:
             }
           }
         });
-
         status.textContent = `${prices.length} pts`;
       } catch (err) {
         status.textContent = 'Failed';
       }
     }
-
     function refreshModalSignals() {
       const box = document.getElementById('modal-signals');
       const sym = currentModalSymbol;
       if (!sym) { box.textContent = '--'; return; }
-
       const s = symbolsData[sym];
       if (!s || !s.signals || s.signals.length === 0) {
         box.textContent = 'No signals yet today.';
         return;
       }
-
       box.innerHTML = s.signals.slice().reverse().map(sig => {
         const badge = sig.type === 'LONG' ? `<span class="pill open" style="border:none;">LONG</span>` : `<span class="pill closed" style="border:none;">SHORT</span>`;
         return `<div style="display:flex; justify-content: space-between; align-items:center; gap: .75rem; padding:.65rem; margin:.5rem 0; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.06); border-radius: 12px;">
@@ -1631,7 +1618,6 @@ def create_fused_dashboard_html() -> str:
       }).join('');
     }
 
-    // Helpers
     function niceKey(k) {
       const map = {
         regularMarketPrice: 'Price',
@@ -1649,7 +1635,6 @@ def create_fused_dashboard_html() -> str:
       };
       return map[k] || k;
     }
-
     function fmtBig(n) {
       const abs = Math.abs(Number(n));
       if (abs >= 1e12) return (n/1e12).toFixed(2) + 'T';
@@ -1664,25 +1649,17 @@ def create_fused_dashboard_html() -> str:
 
 
 def main():
-    import os
-
     templates_dir = "templates"
     os.makedirs(templates_dir, exist_ok=True)
 
-    with open(f"{templates_dir}/dashboard_fused.html", "w", encoding="utf-8") as f:
+    with open(os.path.join(templates_dir, "dashboard_fused.html"), "w", encoding="utf-8") as f:
         f.write(create_fused_dashboard_html())
 
     print("\n" + "=" * 78)
-    print("ORB Scanner - Fused Pro+Control Dashboard")
+    print("ORB Scanner - Fused Pro+Control Dashboard (FIXED)")
     print("=" * 78)
     print("\n🌐 Open your browser and go to:")
     print("👉 http://localhost:5003")
-    print("\n✨ Includes:")
-    print("  • Pro dashboard look & layout")
-    print("  • Add/remove symbols from UI")
-    print("  • Telegram + Email notifications + connection tests")
-    print("  • Multi-timezone market sessions with countdowns")
-    print("  • Click symbol card for modal stats + intraday chart")
     print("\nPress Ctrl+C to stop")
     print("=" * 78 + "\n")
 
